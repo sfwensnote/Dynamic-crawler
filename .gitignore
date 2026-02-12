@@ -1,0 +1,11 @@
+__pycache__/
+*.pyc
+.venv/
+.DS_Store
+logs/
+data/raw_html/
+data/markdown/
+data/manifest.jsonl
+data/中央文件/
+data/教育部文件/
+data/其他部门文件/
