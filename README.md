@@ -86,9 +86,25 @@ data/
 
 详细分析请查看：[CRAWLING_REPORT.md](CRAWLING_REPORT.md)
 
-## 定期更新与维护
+## 定期更新与维护 (增量爬取)
 
-本项目已设计**增量更新方案**，旨在定期检查各分类是否有更新，仅下载新增文件。
-避免全量重复爬取，同时保留原始 HTML 归档。
+本项目提供 `incremental_crawler.py` 脚本，用于**增量更新**。
+它会检查各模块的最新内容，一旦发现连续 20 个文件已存在（说明已追平历史进度），会自动停止爬取该模块。
 
-设计方案请查看：[INCREMENTAL_CRAWL_DESIGN.md](INCREMENTAL_CRAWL_DESIGN.md)
+**特点**：
+- **极速**：通常仅需几秒钟即可完成检查。
+- **省流**：不下载重复文件，不请求旧页面。
+- **归档**：新发现的文件会自动下载并保存 HTML 原文。
+
+**使用方法**：
+```bash
+python incremental_crawler.py
+```
+
+**建议配置 (Cron)**：
+每天凌晨 2 点运行一次：
+```bash
+0 2 * * * cd /path/to/project && source .venv/bin/activate && python incremental_crawler.py >> logs/cron.log 2>&1
+```
+
+详细设计文档：[INCREMENTAL_CRAWL_DESIGN.md](INCREMENTAL_CRAWL_DESIGN.md)
