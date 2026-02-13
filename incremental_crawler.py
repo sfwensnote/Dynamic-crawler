@@ -1,29 +1,29 @@
 #!/usr/bin/env python3
 """
-incremental_crawler.py - 教育部网站全量爬虫（增量更新版）
+incremental_crawler.py - 教育部网站纯增量爬虫
 
 功能：
-  基于 crawler.py 的核心逻辑，增加“连续已存在判定”机制。
-  当连续遇到 20 个已存在的文件时，自动停止当前模块的爬取。
+  专为“定期更新”设计，剔除了全量爬取的复杂逻辑。
+  原理：只爬取列表页的前几页，一旦连续遇到 20 个已存在的文件，立即停止。
   
-  适用于：定期运行（如每日/每周），只抓取最新发布的文件。
+  特点：
+  - 极速：不做全量翻页检测，通常仅请求 1-3 页即可完成。
+  - 省流：仅下载新文件。
 """
 
 import os
-import time
-import logging
+import itertools
 from urllib.parse import urljoin
 from crawler import (
     SOURCES, BASE_DATA_DIR, load_existing_manifest,
-    fetch_with_retry, get_total_pages_static, get_total_pages_dynamic,
-    extract_items_from_static, extract_items_from_dynamic,
+    fetch_with_retry, extract_items_from_static, extract_items_from_dynamic,
     download_detail, polite_sleep, logger
 )
 
-# 连续跳过阈值：如果连续跳过 20 个文件，认为后续都是旧文件，停止爬取
+# 连续跳过阈值
 CONSECUTIVE_SKIP_LIMIT = 20
 
-def crawl_static_incremental(source: dict, existing_urls: set, max_pages: int = None):
+def crawl_static_incremental(source: dict, existing_urls: set):
     """增量爬取静态分页栏目"""
     name = source["name"]
     base_url = source["base_url"]
@@ -31,70 +31,54 @@ def crawl_static_incremental(source: dict, existing_urls: set, max_pages: int = 
     os.makedirs(save_dir, exist_ok=True)
 
     logger.info(f"{'='*60}")
-    logger.info(f"开始增量更新: {name}")
+    logger.info(f"开始增量扫描: {name}")
     logger.info(f"{'='*60}")
-
-    # 第1页
-    first_url = urljoin(base_url, "index.html")
-    resp = fetch_with_retry(first_url)
-    if not resp:
-        logger.error(f"无法访问 {name} 首页")
-        return
-
-    total_pages = get_total_pages_static(resp.text)
-    if max_pages:
-        total_pages = min(total_pages, max_pages)
-    
-    # 增量模式通常不需要爬很多页，但我们仍保留翻页逻辑，靠 skip 机制退出
-    logger.info(f"{name}:检测到共 {total_pages} 页，将执行增量检查...")
 
     stats = {"downloaded": 0, "skipped": 0, "failed": 0}
     consecutive_skips = 0
-    stop_signal = False
 
-    for page_num in range(1, total_pages + 1):
-        if stop_signal:
-            break
-
+    # 无限循环翻页，直到触发停止条件
+    for page_num in itertools.count(1):
         if page_num == 1:
             page_url = urljoin(base_url, "index.html")
-            html = resp.text
+            resp = fetch_with_retry(page_url)
         else:
             page_url = urljoin(base_url, f"index_{page_num - 1}.html")
             polite_sleep(1, 3)
-            page_resp = fetch_with_retry(page_url, retries=1)
-            if not page_resp:
-                logger.warning(f"{name}: 第 {page_num} 页获取失败 (404?)，已到达末尾")
-                break
-            html = page_resp.text
+            resp = fetch_with_retry(page_url, retries=1)
 
-        items = extract_items_from_static(html, page_url)
+        if not resp:
+            logger.info(f"{name}: 第 {page_num} 页无法获取 (可能是翻完或404)，停止扫描")
+            break
+        
+        items = extract_items_from_static(resp.text, page_url)
         logger.info(f"{name}: 第 {page_num} 页, 解析到 {len(items)} 条")
 
         if not items:
-            logger.warning(f"{name}: 第 {page_num} 页无有效条目，停止")
+            logger.warning(f"{name}: 第 {page_num} 页无有效内容，停止")
             break
 
+        # 检查本页内容
         for item in items:
             is_new = download_detail(item, save_dir, existing_urls, name)
             if is_new:
                 stats["downloaded"] += 1
-                consecutive_skips = 0  # 重置计数器
+                consecutive_skips = 0
                 logger.info(f"  ✓ 新增: {item['date']} {item['title'][:40]}...")
             else:
                 stats["skipped"] += 1
                 consecutive_skips += 1
             
             if consecutive_skips >= CONSECUTIVE_SKIP_LIMIT:
-                logger.info(f"⚡️ 连续跳过 {consecutive_skips} 个已存在文件，判定为无新内容。")
+                logger.info(f"⚡️ 连续跳过 {consecutive_skips} 个已存在文件，已追平历史进度。")
                 logger.info(f"🛑 停止爬取模块: {name}")
-                stop_signal = True
-                break
+                logger.info(f"{name} 增量扫描完成: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
+                return
 
-    logger.info(f"{name} 增量更新完成: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
+    logger.info(f"{name} 扫描结束: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
 
 
-def crawl_dynamic_incremental(source: dict, existing_urls: set, max_pages: int = None):
+def crawl_dynamic_incremental(source: dict, existing_urls: set):
     """增量爬取动态分页栏目"""
     name = source["name"]
     base_url = source["base_url"]
@@ -103,51 +87,33 @@ def crawl_dynamic_incremental(source: dict, existing_urls: set, max_pages: int =
     os.makedirs(save_dir, exist_ok=True)
 
     logger.info(f"{'='*60}")
-    logger.info(f"开始增量更新: {name}")
+    logger.info(f"开始增量扫描: {name}")
     logger.info(f"{'='*60}")
-
-    # 第1页
-    params = params_template.copy()
-    resp = fetch_with_retry(base_url, params=params)
-    if not resp:
-        logger.error(f"无法访问 {name} 首页")
-        return
-
-    total_pages = get_total_pages_dynamic(resp.text)
-    if max_pages:
-        total_pages = min(total_pages, max_pages)
-
-    logger.info(f"{name}:检测到共 {total_pages} 页，将执行增量检查...")
 
     stats = {"downloaded": 0, "skipped": 0, "failed": 0}
     consecutive_skips = 0
-    stop_signal = False
 
-    # 动态页翻页：通常只需前几页
-    for page_num in range(1, total_pages + 1):
-        if stop_signal:
-            break
-
-        if page_num == 1:
-            html = resp.text
-            page_url = base_url
-        else:
-            params = params_template.copy()
+    for page_num in itertools.count(1):
+        params = params_template.copy()
+        if page_num > 1:
             params["page"] = page_num
+        
+        if page_num > 1:
             polite_sleep(1, 3)
-            page_resp = fetch_with_retry(base_url, params=params)
-            if not page_resp:
-                logger.warning(f"Failed to fetch page {page_num}")
-                stats["failed"] += 1
-                continue
-            html = page_resp.text
-            page_url = f"{base_url}?page={page_num}"
+            
+        resp = fetch_with_retry(base_url, params=params)
+        if not resp:
+            logger.warning(f"Failed to fetch page {page_num}")
+            stats["failed"] += 1
+            if stats["failed"] > 3: # 连续失败几次就停吧
+                break
+            continue
 
-        items = extract_items_from_dynamic(html, base_url)
+        items = extract_items_from_dynamic(resp.text, base_url)
         logger.info(f"{name}: 第 {page_num} 页, 解析到 {len(items)} 条")
 
         if not items:
-            logger.warning(f"{name}: 第 {page_num} 页无数据，停止")
+            logger.info(f"{name}: 第 {page_num} 页无数据，停止")
             break
 
         for item in items:
@@ -161,13 +127,12 @@ def crawl_dynamic_incremental(source: dict, existing_urls: set, max_pages: int =
                 consecutive_skips += 1
             
             if consecutive_skips >= CONSECUTIVE_SKIP_LIMIT:
-                logger.info(f"⚡️ 连续跳过 {consecutive_skips} 个已存在文件，判定为无新内容。")
+                logger.info(f"⚡️ 连续跳过 {consecutive_skips} 个已存在文件，已追平历史进度。")
                 logger.info(f"🛑 停止爬取模块: {name}")
-                stop_signal = True
-                break
+                logger.info(f"{name} 增量扫描完成: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
+                return
 
-    logger.info(f"{name} 增量更新完成: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
-
+    logger.info(f"{name} 扫描结束: 新增 {stats['downloaded']}, 跳过 {stats['skipped']}")
 
 
 def main():
